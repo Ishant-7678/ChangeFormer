@@ -11,7 +11,7 @@ import numpy as np
 from misc.metric_tool import ConfuseMatrixMeter
 from models.losses import cross_entropy
 import models.losses as losses
-from models.losses import get_alpha, softmax_helper, FocalLoss, mIoULoss, mmIoULoss
+from models.losses import get_alpha, softmax_helper, FocalLoss, mIoULoss, mmIoULoss ,sensoy_edl_loss
 
 from misc.logger_tool import Logger, Timer
 
@@ -48,6 +48,7 @@ class CDTrainer():
         elif args.optimizer == "adamw":
             self.optimizer_G = optim.AdamW(self.net_G.parameters(), lr=self.lr,
                                     betas=(0.9, 0.999), weight_decay=0.01)
+        
 
         # self.optimizer_G = optim.Adam(self.net_G.parameters(), lr=self.lr)
 
@@ -112,6 +113,9 @@ class CDTrainer():
             self._pxl_loss = mmIoULoss(n_classes=args.n_class).cuda()
         else:
             raise NotImplemented(args.loss)
+        # EDL weight
+
+        self.edl_weight = 0.1
 
         self.VAL_ACC = np.array([], np.float32)
         if os.path.exists(os.path.join(self.checkpoint_dir, 'val_acc.npy')):
@@ -213,7 +217,7 @@ class CDTrainer():
             message = 'Is_training: %s. [%d,%d][%d,%d], imps: %.2f, est: %.2fh, G_loss: %.5f, running_mf1: %.5f\n' %\
                       (self.is_training, self.epoch_id, self.max_num_epochs-1, self.batch_id, m,
                      imps*self.batch_size, est,
-                     self.G_loss.item(), running_acc)
+                     self.G_loss.item(),self.edl_loss.item(),running_acc)
             self.logger.write(message)
 
 
@@ -291,21 +295,40 @@ class CDTrainer():
 
             
     def _backward_G(self):
-        gt = self.batch['L'].to(self.device).float()
-        if self.multi_scale_train == "True":
-            i         = 0
-            temp_loss = 0.0
-            for pred in self.G_pred:
-                if pred.size(2) != gt.size(2):
-                    temp_loss = temp_loss + self.weights[i]*self._pxl_loss(pred, F.interpolate(gt, size=pred.size(2), mode="nearest"))
-                else:
-                    temp_loss = temp_loss + self.weights[i]*self._pxl_loss(pred, gt)
-                i+=1
-            self.G_loss = temp_loss
-        else:
-            self.G_loss = self._pxl_loss(self.G_pred[-1], gt)
+     gt = self.batch['L'].to(self.device).float()
 
-        self.G_loss.backward()
+     if self.multi_scale_train == "True":
+        i = 0
+        temp_loss = 0.0
+
+        for pred in self.G_pred:
+            if pred.size(2) != gt.size(2):
+                temp_loss += self.weights[i] * self._pxl_loss(
+                    pred,
+                    F.interpolate(gt, size=pred.size(2), mode="nearest")
+                )
+            else:
+                temp_loss += self.weights[i] * self._pxl_loss(pred, gt)
+            i += 1
+
+        base_loss = temp_loss
+
+     else:
+        base_loss = self._pxl_loss(self.G_pred[-1], gt)
+
+    # ==========================
+    # Sensoy EDL Loss
+    # ==========================
+     edl_loss = sensoy_edl_loss(
+        self.G_pred[-1],
+        gt.squeeze(1).long() if gt.dim() == 4 else gt.long()
+    )
+
+     self.edl_loss = edl_loss
+
+     self.G_loss = base_loss + self.edl_weight * edl_loss
+
+     self.G_loss.backward()
 
 
     def train_models(self):
@@ -355,4 +378,5 @@ class CDTrainer():
             ##########################################
             self._update_val_acc_curve()
             self._update_checkpoints()
+
 

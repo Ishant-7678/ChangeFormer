@@ -1,6 +1,8 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
 
 from models.networks import *
 from misc.metric_tool import ConfuseMatrixMeter
@@ -106,12 +108,12 @@ class CDEvaluator():
 
         m = len(self.dataloader)
 
-        if np.mod(self.batch_id, 100) == 1:
+        if True:
             message = 'Is_training: %s. [%d,%d],  running_mf1: %.5f\n' %\
                       (self.is_training, self.batch_id, m, running_acc)
             self.logger.write(message)
 
-        if np.mod(self.batch_id, 100) == 1:
+        if True:
             vis_input = utils.make_numpy_grid(de_norm(self.batch['A']))
             vis_input2 = utils.make_numpy_grid(de_norm(self.batch['B']))
 
@@ -123,6 +125,28 @@ class CDEvaluator():
             file_name = os.path.join(
                 self.vis_dir, 'eval_' + str(self.batch_id)+'.jpg')
             plt.imsave(file_name, vis)
+
+            img_A = vis_input
+            img_B = vis_input2
+            pred_img = vis_pred
+            gt_img = vis_gt
+
+            pred = torch.argmax(self.G_pred, dim=1)
+            gt = self.batch['L'].to(self.device)
+            if gt.dim()==4:
+                gt = gt.squeeze(1)
+
+            prob = self.flood_prob.cpu().numpy()[0]
+            unc = self.uncertainty.cpu().numpy()[0]
+            error = (pred!=gt).float().cpu().numpy()[0]
+
+            plt.imsave(os.path.join(self.vis_dir,f"img_A_{self.batch_id}.png"),img_A)
+            plt.imsave(os.path.join(self.vis_dir,f"img_B_{self.batch_id}.png"),img_B)
+            plt.imsave(os.path.join(self.vis_dir,f"gt_{self.batch_id}.png"),gt_img)
+            plt.imsave(os.path.join(self.vis_dir,f"pred_{self.batch_id}.png"),pred_img)
+            plt.imsave(os.path.join(self.vis_dir,f"probability_{self.batch_id}.png"),prob,cmap="viridis")
+            plt.imsave(os.path.join(self.vis_dir,f"uncertainty_{self.batch_id}.png"),unc,cmap="inferno")
+            plt.imsave(os.path.join(self.vis_dir,f"error_{self.batch_id}.png"),error,cmap="RdYlGn_r")
 
 
     def _collect_epoch_states(self):
@@ -153,6 +177,16 @@ class CDEvaluator():
         img_in2 = batch['B'].to(self.device)
         self.G_pred = self.net_G(img_in1, img_in2)[-1]
 
+        # ===== EDL START =====
+        self.prob = torch.softmax(self.G_pred, dim=1)
+        self.flood_prob = self.prob[:, 1]
+
+        evidence = F.softplus(self.G_pred)
+        alpha = evidence + 1.0
+        self.evidence = evidence
+        self.uncertainty = 2.0 / alpha.sum(dim=1)
+        # ===== EDL END =====
+
     def eval_models(self,checkpoint_name='best_ckpt.pt'):
 
         self._load_checkpoint(checkpoint_name)
@@ -169,4 +203,9 @@ class CDEvaluator():
             with torch.no_grad():
                 self._forward_pass(batch)
             self._collect_running_batch_states()
+        print(f"Mean Evidence: {self.evidence.mean().item():.4f}")
+        print(f"Mean Uncertainty: {self.uncertainty.mean().item():.4f}")
         self._collect_epoch_states()
+
+
+
